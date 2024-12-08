@@ -1,0 +1,659 @@
+using UnityEngine;
+using UnityEngine.UI;
+using System.Collections;
+using TMPro;
+
+public class HeroKnight : MonoBehaviour
+{
+
+    [SerializeField] float m_speed = 7f;
+    [SerializeField] float m_jumpForce = 10f;
+    [SerializeField] float m_rollForce = 6.0f;
+    [SerializeField] bool m_noBlood = false;
+
+    public GameObject player;
+    public static HeroKnight playerStats;
+    private Animator m_animator;
+    private Rigidbody2D m_body2d;
+    private Sensor_HeroKnight m_groundSensor;
+    private Sensor_HeroKnight m_wallSensorR1;
+    private Sensor_HeroKnight m_wallSensorR2;
+    private Sensor_HeroKnight m_wallSensorL1;
+    private Sensor_HeroKnight m_wallSensorL2;
+    private bool m_isWallSliding = false;
+    private bool m_grounded = false;
+    private bool m_rolling = false;
+    private int m_facingDirection = 1;
+    private float m_timeSinceAttack = 0.0f;
+    private float m_delayToIdle = 0.0f;
+    private float m_rollDuration = 8.0f / 14.0f;
+    private float m_rollCurrentTime;
+    public int meleeDamage;
+    public Transform meleePoint;
+    private Vector3 meleeAttackOffset;
+    private Vector3 respawnPoint;
+    public int maxHealth = 100;
+    public int currentHealth;
+    public HealthBar healthBar;
+    public int souls;
+    public float damageResistance = 0f; // Percentage of damage reduced (e.g., 0.2 for 20%)
+    private int m_attackIndex = 0;
+    private float m_comboResetTime = 1.0f; // Time to reset combo
+    private float m_lastAttackTime = 0.0f;
+    private bool m_isInvincible = false;
+    private bool isHealing = false;
+    private bool canPerformAttack1 = true; // Flag to allow Attack 2
+    private bool canPerformAttack2 = false; // Flag to allow Attack 2
+    private bool canPerformAttack3 = false; // Flag to allow Attack 3
+    [SerializeField] private string defaultLayer = "Player";
+    [SerializeField] private string rollingLayer = "IgnoreEnemies";
+    [SerializeField] private TMP_Text soulsValue;
+    [SerializeField] public int healingItems; // Initial healing item count
+    [SerializeField] public int currentHealingItems;
+    [SerializeField] private int healAmount = 20; // Amount of health restored per item
+    public Image[] healingItemSprites; // Array of UI Images for healing item sprites
+    public Sprite healingItemSprite; // Sprite representing a healing item
+    public Sprite emptyItemSprite; // Sprite for an empty slot (optional)
+
+
+
+    private IEnumerator RollCoroutine()
+    {
+
+
+        // Ignore collisions between player and enemies during the roll
+        Physics2D.IgnoreLayerCollision(6, 7, true);
+
+        // Make the player invincible during the roll
+        m_isInvincible = true;
+
+        // Perform the roll logic
+        m_rolling = true;
+        m_animator.SetTrigger("Roll");
+        m_body2d.velocity = new Vector2(m_facingDirection * m_rollForce, m_body2d.velocity.y);
+
+        // Wait for the roll duration
+        yield return new WaitForSeconds(m_rollDuration);
+
+        // Re-enable collisions between player and enemies
+        Physics2D.IgnoreLayerCollision(6, 7, false);
+
+        // Disable invincibility and reset rolling state
+        m_isInvincible = false;
+        m_rolling = false;
+    }
+
+
+
+    void Awake()
+    {
+        if (playerStats == null)
+        {
+            playerStats = this;
+            DontDestroyOnLoad(gameObject); // Prevent this object from being destroyed when loading a new scene
+        }
+        else if (playerStats != this)
+        {
+            Destroy(gameObject); // Destroy duplicate instances
+        }
+    }
+
+    void Start()
+    {
+
+        UpdateHealingItemsUI();
+
+        Debug.Log("Healing items initialized: " + currentHealingItems);
+
+        gameObject.layer = LayerMask.NameToLayer(defaultLayer);
+
+        LoadPlayerData();
+        healthBar.SetMaxHealth(maxHealth);
+        healthBar.SetHealth(currentHealth);
+        meleeAttackOffset = new Vector3(.26f, 0f, 0f);
+
+        // Load player data from PlayerPref
+        if (PlayerPrefs.HasKey("PlayerHealth"))
+        {
+            currentHealth = PlayerPrefs.GetInt("PlayerHealth");  // Load saved health
+            //healthValue.text = "Health: " + currentHealth.ToString();
+        }
+        else
+        {
+            currentHealth = maxHealth;  // If no data exists, start with max health
+        }
+
+        if (PlayerPrefs.HasKey("PlayerSouls"))
+        {
+            souls = PlayerPrefs.GetInt("PlayerSouls");  // Load saved souls
+            soulsValue.text = "Souls " + souls.ToString();  // Update the souls UI
+        }
+        else
+        {
+            souls = 0;  // If no data exists, start with 0 souls
+            soulsValue.text = "Souls " + souls.ToString();  // Update the souls UI
+        }
+        // Check if playerStats is already set
+        if (playerStats == null)
+        {
+            playerStats = this;  // Set the static reference to this instance
+        }
+
+
+        m_animator = GetComponent<Animator>();
+        m_body2d = GetComponent<Rigidbody2D>();
+
+        if (m_animator == null || m_body2d == null)
+        {
+            Debug.LogError("Animator or Rigidbody2D component not found.");
+            return;
+        }
+
+        m_groundSensor = transform.Find("GroundSensor").GetComponent<Sensor_HeroKnight>();
+        m_wallSensorR1 = transform.Find("WallSensor_R1").GetComponent<Sensor_HeroKnight>();
+        m_wallSensorR2 = transform.Find("WallSensor_R2").GetComponent<Sensor_HeroKnight>();
+        m_wallSensorL1 = transform.Find("WallSensor_L1").GetComponent<Sensor_HeroKnight>();
+        m_wallSensorL2 = transform.Find("WallSensor_L2").GetComponent<Sensor_HeroKnight>();
+
+        if (m_groundSensor == null || m_wallSensorR1 == null || m_wallSensorR2 == null)
+        {
+            Debug.LogError("Sensor components not found.");
+            return;
+        }
+
+        respawnPoint = transform.position;
+        currentHealth = maxHealth;
+        healthBar.SetMaxHealth(maxHealth);
+
+    }
+
+
+
+
+    void Update()
+    {
+
+        if (isHealing)
+        {
+            return;
+        }
+        // Prevent code execution if healthBar or soulsValue is null
+        if (healthBar == null || soulsValue == null)
+        {
+            return;
+        }
+
+        // Check for roll input
+        if (Input.GetKeyDown(KeyCode.LeftShift) && !m_rolling && !m_isWallSliding)
+        {
+            StartCoroutine(RollCoroutine());
+        }
+        // Handle player input...
+
+        if (Input.GetKeyDown(KeyCode.F))
+        {
+            UseHealingItem();
+        }
+
+        // Update melee attack position based on the facing direction (left or right)
+        if (m_facingDirection == 1) // Facing right
+        {
+            meleeAttackOffset = new Vector3(0.26f, 0f, 0f);  // Right attack offset
+        }
+        else if (m_facingDirection == -1) // Facing left
+        {
+            meleeAttackOffset = new Vector3(-0.26f, 0f, 0f);  // Left attack offset
+        }
+
+        // Only check dialogue state if DialogueManager is initialized
+        if (DialogueManager.GetInstance() != null && DialogueManager.GetInstance().dialogueIsPlaying)
+        {
+            return;  // Prevent movement or other actions if dialogue is active
+        }
+        m_timeSinceAttack += Time.deltaTime;
+
+        if (m_rolling)
+            m_rollCurrentTime += Time.deltaTime;
+
+        if (m_rollCurrentTime > m_rollDuration)
+            m_rolling = false;
+
+        if (!m_grounded && m_groundSensor.State())
+        {
+            m_grounded = true;
+            m_animator.SetBool("Grounded", m_grounded);
+        }
+
+        if (m_grounded && !m_groundSensor.State())
+        {
+            m_grounded = false;
+            m_animator.SetBool("Grounded", m_grounded);
+        }
+
+        float inputX = Input.GetAxis("Horizontal");
+
+        if (inputX > 0)
+        {
+            GetComponent<SpriteRenderer>().flipX = false;
+            m_facingDirection = 1;
+        }
+        else if (inputX < 0)
+        {
+            GetComponent<SpriteRenderer>().flipX = true;
+            m_facingDirection = -1;
+        }
+
+        if (!m_rolling)
+            m_body2d.velocity = new Vector2(inputX * m_speed, m_body2d.velocity.y);
+
+        m_animator.SetFloat("AirSpeedY", m_body2d.velocity.y);
+
+        m_isWallSliding = (m_wallSensorR1.State() && m_wallSensorR2.State()) || (m_wallSensorL1.State() && m_wallSensorL2.State());
+        m_animator.SetBool("WallSlide", m_isWallSliding);
+
+        if (m_timeSinceAttack > 0.1f && !m_rolling)
+        {
+            if (Input.GetMouseButtonDown(0)) // Check for attack input
+            {
+                // Trigger the appropriate attack animation based on the current attack index
+                if (m_attackIndex == 0)
+                {
+                    Debug.Log("Attack1");
+                    m_animator.SetTrigger("Attack1");
+                }
+                else if (m_attackIndex == 1)
+                {
+                    Debug.Log("Attack2");
+                    m_animator.SetTrigger("Attack2");
+                }
+                else if (m_attackIndex == 2)
+                {
+                    Debug.Log("Attack3");
+                    m_animator.SetTrigger("Attack3"); // Assuming you have an Attack3
+                }
+
+                // Increment the attack index and loop back to 0 after the last attack
+                m_attackIndex = (m_attackIndex + 1) % 3;
+
+                // Detect hits with overlap box
+                Vector2 boxSize = new Vector2(2.2f, 2.1f);  // Adjust size as needed
+                Collider2D[] hitObjects = Physics2D.OverlapBoxAll(meleePoint.position, boxSize, 0f);
+
+                foreach (Collider2D hit in hitObjects)
+                {
+                    if (!hit.CompareTag("Player"))
+                    {
+                        hit.gameObject.SendMessage("TakeDamage", meleeDamage, SendMessageOptions.DontRequireReceiver);
+                    }
+                }
+
+                // Reset time between attacks
+                m_timeSinceAttack = 0.0f;  // Cooldown time after each attack
+
+                // Update the last attack time for combo logic
+                m_lastAttackTime = Time.time;
+            }
+
+            // Handle block logic
+            if (Input.GetMouseButtonDown(1) && !m_rolling)
+            {
+                m_animator.SetTrigger("Block");
+            }
+            else if (Input.GetMouseButtonUp(1))
+            {
+                m_animator.SetBool("IdleBlock", false);
+            }
+
+            // Handle roll logic
+            if (Input.GetKeyDown(KeyCode.LeftShift) && !m_rolling && !m_isWallSliding)
+            {
+                m_rolling = true;
+                m_animator.SetTrigger("Roll");
+                m_body2d.velocity = new Vector2(m_facingDirection * m_rollForce, m_body2d.velocity.y);
+            }
+
+            // Handle jump logic
+            if (Input.GetKeyDown(KeyCode.Space) && m_grounded && !m_rolling)
+            {
+                m_animator.SetTrigger("Jump");
+                m_grounded = false;
+                m_animator.SetBool("Grounded", m_grounded);
+                m_body2d.velocity = new Vector2(m_body2d.velocity.x, m_jumpForce);
+                m_groundSensor.Disable(0.2f);
+            }
+
+            // Handle idle or running states
+            if (Mathf.Abs(inputX) > Mathf.Epsilon)
+            {
+                m_delayToIdle = 0.05f;
+                m_animator.SetInteger("AnimState", 1); // Running
+            }
+            else
+            {
+                m_delayToIdle -= Time.deltaTime;
+                if (m_delayToIdle < 0)
+                    m_animator.SetInteger("AnimState", 0); // Idle
+            }
+
+            if (m_grounded)
+            {
+                if (Mathf.Abs(inputX) > Mathf.Epsilon)
+                {
+                    m_animator.SetInteger("AnimState", 1); // Running
+                }
+                else
+                {
+                    m_animator.SetInteger("AnimState", 0); // Idle
+                }
+            }
+            else
+            {
+                m_animator.SetInteger("AnimState", 2); // Airborne (falling or jumping)
+            }
+
+            // Update time since last attack
+            m_timeSinceAttack += Time.deltaTime;
+        }
+    }
+    public void ReEnableInput()
+    {
+        isHealing = false;
+        canPerformAttack2 = true;
+        canPerformAttack3 = true;
+        // This function will be called when the 'ReEnableInput' animation event is triggered
+        // Re-enable the player input or whatever logic is necessary
+        Debug.Log("Re-enabling player input.");
+        // Example: Set a flag to allow player input again
+        // playerInputEnabled = true;
+    }
+
+
+
+    private void OnTriggerEnter2D(Collider2D collision)
+    {
+        if (collision.tag == "Checkpoint")
+        {
+            respawnPoint = transform.position;
+
+        }
+    }
+
+    public void TakeDamage(int damage)
+    {
+        // Ignore damage if the player is invincible
+        if (m_isInvincible)
+        {
+            return;
+        }
+
+
+        // Apply damage resistance
+        float actualDamage = damage * (1 - damageResistance); // Reduce damage based on resistance
+        currentHealth -= Mathf.CeilToInt(actualDamage); // Round up to the nearest whole number
+                                                        // Update the health bar
+        healthBar.SetHealth(currentHealth);
+
+        // Update the health value text
+        //healthValue.text = "Health: " + currentHealth.ToString();
+
+        healthBar.SetHealth(currentHealth);  // Update the health bar
+        PlayerPrefs.SetInt("PlayerHealth", currentHealth);
+        PlayerPrefs.Save();
+        Animator animator = GetComponent<Animator>();
+        animator.SetTrigger("Hurt");
+
+
+        // Check if the player is blocking
+        AnimatorStateInfo stateInfo = m_animator.GetCurrentAnimatorStateInfo(0); // Assuming the default animation layer
+        if (stateInfo.IsName("Block") || stateInfo.IsName("IdleBlock"))
+        {
+            return; // No damage if blocking
+        }
+
+        if (currentHealth <= 0)
+        {
+            // Reduce souls by half
+            souls /= 2;
+            soulsValue.text = "Souls " + souls.ToString();  // Update the souls UI
+
+            // Save the updated souls count
+            PlayerPrefs.SetInt("PlayerSouls", souls);
+            PlayerPrefs.Save();
+
+            transform.position = respawnPoint;  // Respawn the player if health is 0
+            currentHealth = maxHealth;         // Reset health to max
+            healthBar.SetHealth(currentHealth);
+            //healthValue.text = ("Health: ") + maxHealth.ToString();
+
+            // Reset healing items
+            currentHealingItems = healingItems; // Replenish to max
+            UpdateHealingItemsUI();
+            Debug.Log("Healing items replenished to max.");
+            Debug.Log("dead");
+        }
+    }
+
+    public void DealDamage(int damage)
+    {
+        // Check if the attack is happening during a block or while invincible
+        AnimatorStateInfo stateInfo = m_animator.GetCurrentAnimatorStateInfo(0); // Replace 0 with the appropriate layer index if necessary
+        if (stateInfo.IsName("Block") || stateInfo.IsName("IdleBlock"))
+        {
+            return; // If player is blocking, do not deal damage
+        }
+
+        // Apply damage to the enemy
+        float actualDamage = damage * (1 - damageResistance); // Calculate damage with resistance (if any)
+
+        // Find enemies in the melee range
+        Collider2D[] hitObjects = Physics2D.OverlapBoxAll(meleePoint.position, new Vector2(2.2f, 2.1f), 0f);
+
+        foreach (Collider2D hit in hitObjects)
+        {
+            if (hit.CompareTag("Enemy")) // Only hit enemies
+            {
+                // Send the actual damage to the enemy's TakeDamage method
+                hit.gameObject.SendMessage("TakeDamage", Mathf.CeilToInt(meleeDamage), SendMessageOptions.DontRequireReceiver);
+            }
+        }
+
+        // Reset the attack cooldown timer
+        m_timeSinceAttack = 0.0f;
+    }
+
+
+    public void AddCurrency(CurrencyPickup currency)
+    {
+        if (currency.currentObject == CurrencyPickup.PickupObject.CURRENCY)
+        {
+            souls += currency.quantity;
+            PlayerPrefs.SetInt("PlayerSouls", souls); // Save updated souls count
+            PlayerPrefs.Save();
+
+            UpdateSoulsUI(); // Refresh UI
+        }
+    }
+
+    public void UseHealingItem()
+    {
+        AnimatorStateInfo stateInfo = m_animator.GetCurrentAnimatorStateInfo(0);  // Assuming "0" is the default layer
+
+        // Check if there are healing items available
+        if (stateInfo.fullPathHash != Animator.StringToHash("Base Layer.Jumping") && currentHealingItems > 0)
+        {
+            if (currentHealth < maxHealth)
+            {
+                // Reduce healing item count and update the UI
+                currentHealingItems--;
+                UpdateHealingItemsUI(); // Update the healing item UI
+
+                // Restore health
+                currentHealth = Mathf.Min(currentHealth + healAmount, maxHealth);
+
+                // Update health bar and text
+                healthBar.SetHealth(currentHealth);
+                //healthValue.text = "Health: " + currentHealth.ToString();
+
+                // Save the healing item count
+                PlayerPrefs.SetInt("PlayerHealingItems", currentHealingItems);
+                PlayerPrefs.Save();
+
+                isHealing = true;
+
+                // Play Heal animation
+                m_animator.SetTrigger("Heal");
+
+                Debug.Log("Used a healing item. Current health: " + currentHealth);
+            }
+            else
+            {
+                Debug.Log("Health is already full.");
+            }
+        }
+        else
+        {
+            Debug.Log("No healing items left.");
+        }
+    }
+
+
+
+
+    public void UpdateHealingItemsUI()
+    {
+        Debug.Log("Updating healing items UI. Current items: " + currentHealingItems);
+        // Loop through all the healing item images
+        for (int i = 0; i < healingItemSprites.Length; i++)
+        {
+            if (i < currentHealingItems)
+            {
+                // Show the healing item sprite
+                healingItemSprites[i].sprite = healingItemSprite;
+                healingItemSprites[i].enabled = true; // Make sure the sprite is visible
+            }
+            else
+            {
+                // Hide the healing item sprite (or use an "empty" sprite)
+                healingItemSprites[i].sprite = emptyItemSprite;
+                healingItemSprites[i].enabled = false; // Hide the sprite
+            }
+        }
+    }
+
+    public void IncreaseHealingItems()
+    {
+        currentHealingItems = healingItems;
+        UpdateHealingItemsUI();
+
+    }
+    
+
+
+    void LoadPlayerData()
+    {
+        // Load Max Health
+        maxHealth = PlayerPrefs.GetInt("PlayerMaxHealth", 100); // Default 100 if not found
+        currentHealth = PlayerPrefs.GetInt("PlayerHealth", maxHealth);
+
+        // Update the health bar
+        healthBar.SetMaxHealth(maxHealth);
+        healthBar.SetHealth(currentHealth);
+
+        // Load Souls
+        souls = PlayerPrefs.GetInt("PlayerSouls", 0); // Default to 0 if not found
+        UpdateSoulsUI(); // Ensure UI is updated immediately
+        // Load Max Health
+        if (PlayerPrefs.HasKey("PlayerMaxHealth"))
+        {
+            maxHealth = PlayerPrefs.GetInt("PlayerMaxHealth");
+            Debug.Log("Max Health loaded: " + maxHealth);
+        }
+        else
+        {
+            maxHealth = 100; // Default value if no data exists
+            Debug.LogWarning("No Max Health found in PlayerPrefs. Using default: " + maxHealth);
+        }
+
+        // Load Current Health
+        if (PlayerPrefs.HasKey("PlayerHealth"))
+        {
+            currentHealth = PlayerPrefs.GetInt("PlayerHealth");
+        }
+        else
+        {
+            currentHealth = maxHealth;
+        }
+
+        // Update the health bar
+        healthBar.SetMaxHealth(maxHealth);
+        healthBar.SetHealth(currentHealth);
+
+        // Load Souls
+        if (PlayerPrefs.HasKey("PlayerSouls"))
+        {
+            souls = PlayerPrefs.GetInt("PlayerSouls");
+            soulsValue.text = "Souls " + souls.ToString(); // Update the souls UI
+        }
+        else
+        {
+            souls = 0; // Default value
+            soulsValue.text = "Souls " + souls.ToString(); // Update the souls UI
+        }
+
+
+        currentHealingItems = healingItems; // Replenish to max
+
+
+        // Check sprite array validity and update UI
+        if (healingItemSprites != null && healingItemSprites.Length > 0)
+        {
+            UpdateHealingItemsUI();
+        }
+        else
+        {
+            Debug.LogError("HealingItemSprites array is not properly assigned!");
+        }
+    }
+
+    private void UpdateSoulsUI()
+    {
+        if (soulsValue != null)
+        {
+            soulsValue.text = "Souls " + souls.ToString();
+        }
+        else
+        {
+            Debug.LogWarning("Souls UI Text component is not assigned.");
+        }
+    }
+
+    public void SpendSouls(int amount)
+    {
+        if (souls >= amount) // Check if the player has enough souls
+        {
+            souls -= amount; // Subtract the souls spent
+            PlayerPrefs.SetInt("PlayerSouls", souls); // Save the new souls count
+            PlayerPrefs.Save(); // Ensure it's saved
+
+            soulsValue.text = "Souls " + souls.ToString(); // Update the souls UI
+            Debug.Log("Souls spent: " + amount + ". Remaining souls: " + souls);
+        }
+        else
+        {
+            Debug.Log("Not enough souls to upgrade.");
+        }
+    }
+
+
+    public void SavePlayerData()
+    {
+        PlayerPrefs.SetInt("PlayerHealth", currentHealth);
+        PlayerPrefs.SetInt("PlayerSouls", souls);
+        PlayerPrefs.SetInt("PlayerMaxHealth", maxHealth);
+        PlayerPrefs.SetInt("PlayerHealingItems", currentHealingItems);
+        PlayerPrefs.Save(); // Make sure to save the data
+    }
+
+
+
+}
